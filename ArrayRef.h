@@ -3,8 +3,9 @@
 #pragma once
 
 #include <cassert>
-#include <iterator>    // iterator_traits
-#include <type_traits> // enable_if, is_const, is_convertible, remove_pointer
+#include <cstddef>
+#include <iterator>
+#include <type_traits>
 
 namespace cxx {
 
@@ -18,22 +19,22 @@ using is_array_convertible = std::is_convertible< From (*)[], To (*)[] >;
 template <typename PointerT>
 class array_iterator
 {
+    static_assert(std::is_pointer<PointerT>::value, "invalid template argument");
+
     template <typename> friend class array_iterator;
 
 public:
+    using iterator_category = std::random_access_iterator_tag;
     using element_type      = std::remove_pointer_t<PointerT>;
-    using iterator_category = typename std::iterator_traits<PointerT>::iterator_category;
-    using value_type        = typename std::iterator_traits<PointerT>::value_type;
-    using reference         = typename std::iterator_traits<PointerT>::reference;
-    using pointer           = typename std::iterator_traits<PointerT>::pointer;
-    using difference_type   = typename std::iterator_traits<PointerT>::difference_type;
+    using value_type        = std::remove_cv_t<element_type>;
+    using reference         = std::add_lvalue_reference_t<element_type>;
+    using pointer           = std::add_pointer_t<element_type>;
+    using difference_type   = std::ptrdiff_t;
 
 private:
     pointer ptr_ = nullptr;
     difference_type pos_ = 0;
-#ifndef NDEBUG
     difference_type size_ = 0;
-#endif
 
 public:
     constexpr array_iterator() noexcept = default;
@@ -49,24 +50,18 @@ public:
     constexpr array_iterator(array_iterator<OtherPointerT> const& it) noexcept
         : ptr_(it.ptr_)
         , pos_(it.pos_)
-#ifndef NDEBUG
         , size_(it.size_)
-#endif
     {
     }
 
     constexpr array_iterator(pointer ptr, difference_type size, difference_type pos = 0) noexcept
         : ptr_(ptr)
         , pos_(pos)
-#ifndef NDEBUG
         , size_(size)
-#endif
     {
         assert((ptr_ == nullptr && size_ == 0) || (ptr_ != nullptr && size_ >= 0));
         assert(pos_ >= 0);
         assert(pos_ <= size_);
-
-        static_cast<void>(size); // maybe unused
     }
 
     constexpr pointer ptr() const noexcept {
@@ -200,17 +195,20 @@ template <typename T>
 class array_ref
 {
 public:
-    using iterator     = array_iterator<T*>;
-    using element_type = typename iterator::element_type;
-    using value_type   = typename iterator::value_type;
-    using reference    = typename iterator::reference;
-    using pointer      = typename iterator::pointer;
-    using size_type    = typename iterator::difference_type;
-    using index_type   = typename iterator::difference_type;
+    using iterator        = array_iterator<T*>;
+    using element_type    = typename iterator::element_type;
+    using value_type      = typename iterator::value_type;
+    using reference       = typename iterator::reference;
+    using pointer         = typename iterator::pointer;
+    using difference_type = typename iterator::difference_type;
 
 private:
     pointer data_ = nullptr;
-    size_type size_ = 0;
+    difference_type size_ = 0;
+
+    static constexpr difference_type Min(difference_type x, difference_type y) {
+        return y < x ? y : x;
+    }
 
 public:
     constexpr array_ref() noexcept = default;
@@ -225,7 +223,7 @@ public:
     }
 
     constexpr array_ref(iterator first, iterator last) noexcept
-        : data_(first.ptr()) // data_(first == last ? pointer{} : &*first)
+        : data_(first.ptr())
         , size_(last - first)
     {
         assert((data_ == nullptr && size_ == 0) || (data_ != nullptr && size_ >= 0));
@@ -233,39 +231,35 @@ public:
 
     template <
         typename U,
-        typename = std::enable_if_t< is_array_convertible<U, element_type>::value >
+        typename = std::enable_if_t<is_array_convertible<U, element_type>::value>
     >
-    constexpr array_ref(U* p, size_type n) noexcept
+    constexpr array_ref(U* p, difference_type n) noexcept
         : data_(p)
         , size_(n)
     {
-        assert((data_ == nullptr && size_ == 0) || (data_ != nullptr && size_ >= 0));
     }
 
     template <
         typename U, size_t N,
         typename = std::enable_if_t< is_array_convertible<U, element_type>::value >
     >
-    constexpr array_ref(U (&arr)[N], size_type n = N) noexcept
+    constexpr array_ref(U (&arr)[N]) noexcept
         : data_(arr)
-        , size_(n)
+        , size_(N)
     {
-        assert(n <= N);
     }
 
     template <
         typename Rhs,
         typename = std::enable_if_t<
-            /*!std::is_const<element_type>::value &&*/
             is_array_convertible<
-                std::remove_pointer_t<decltype( std::declval<Rhs&>().data() )>,
-                element_type
+                std::remove_pointer_t<decltype( std::declval<Rhs&>().data() )>, element_type
             >::value
         >
     >
     constexpr array_ref(Rhs& rhs) noexcept
         : data_(rhs.data())
-        , size_(static_cast<size_type>(rhs.size()))
+        , size_(static_cast<difference_type>(rhs.size()))
     {
     }
 
@@ -274,14 +268,13 @@ public:
         typename = std::enable_if_t<
             std::is_const<element_type>::value &&
             is_array_convertible<
-                std::remove_pointer_t<decltype( std::declval<Rhs const&>().data() )>,
-                element_type
+                std::remove_pointer_t<decltype( std::declval<Rhs const&>().data() )>, element_type
             >::value
         >
     >
     constexpr array_ref(Rhs const& rhs) noexcept
         : data_(rhs.data())
-        , size_(static_cast<size_type>(rhs.size()))
+        , size_(static_cast<difference_type>(rhs.size()))
     {
     }
 
@@ -289,17 +282,17 @@ public:
         return data_;
     }
 
-    constexpr reference operator[](index_type index) const noexcept {
+    constexpr reference operator[](difference_type index) const noexcept {
         assert(index >= 0);
-        assert(index < size());
+        assert(index < size_);
         return data_[index];
     }
 
-    constexpr size_type size() const noexcept {
+    constexpr difference_type size() const noexcept {
         return size_;
     }
 
-    constexpr size_type size_in_bytes() const noexcept {
+    constexpr difference_type size_in_bytes() const noexcept {
         return size_ * sizeof(element_type);
     }
 
@@ -316,46 +309,50 @@ public:
     }
 
     // Returns [begin(), begin() + n)
-    constexpr array_ref front(size_type n = 1) const noexcept {
+    constexpr array_ref take_front(difference_type n = 1) const noexcept {
+        n = Min(n, size());
         return { begin(), begin() + n };
     }
 
     // Returns [end() - n, end())
-    constexpr array_ref back(size_type n = 1) const noexcept {
+    constexpr array_ref take_back(difference_type n = 1) const noexcept {
+        n = Min(n, size());
         return { end() - n, end() };
     }
 
     // Returns [begin() + n, end())
-    constexpr array_ref drop_front(size_type n = 1) const noexcept {
+    constexpr array_ref drop_front(difference_type n = 1) const noexcept {
+        n = Min(n, size());
         return { begin() + n, end() };
     }
 
     // Returns [begin(), end() - n)
-    constexpr array_ref drop_back(size_type n = 1) const noexcept {
+    constexpr array_ref drop_back(difference_type n = 1) const noexcept {
+        n = Min(n, size());
         return { begin(), end() - n };
     }
 
     // Returns [first, last)
-    constexpr array_ref subarray(index_type first, index_type last) const noexcept {
-        return { begin() + first, begin() + last };
+    constexpr array_ref subarray(difference_type first, difference_type last) const noexcept {
+        return take_front(last).drop_front(first);
     }
 
     // Returns [first, end())
-    constexpr array_ref subarray(index_type first) const noexcept {
-        return { begin() + first, end() };
+    constexpr array_ref subarray(difference_type first) const noexcept {
+        return drop_front(first);
     }
 
     // Returns [first, first + n)
-    constexpr array_ref slice(index_type first, size_type n) const noexcept {
-        return { begin() + first, begin() + (first + n) };
+    constexpr array_ref slice(difference_type first, difference_type n) const noexcept {
+        return drop_front(first).take_front(n);
     }
 
     // Returns [first, end())
-    constexpr array_ref slice(index_type first) const noexcept {
-        return { begin() + first, end() };
+    constexpr array_ref slice(difference_type first) const noexcept {
+        return drop_front(first);
     }
 
-#if 0
+#if 1
     constexpr friend bool operator==(array_ref lhs, array_ref rhs) noexcept {
         return lhs.data() == rhs.data() && lhs.size() == rhs.size();
     }
@@ -384,80 +381,33 @@ public:
 #endif
 };
 
-#if 0
-template <
-    typename T,
-    typename U,
-    typename = std::enable_if_t<
-        std::is_convertible<decltype(std::declval<T>() == std::declval<U>()), bool>::value
-    >
->
-constexpr bool operator==(array_ref<T> lhs, array_ref<U> rhs) noexcept
-{
-    return lhs.size() == rhs.size() &&
-        (lhs.data() == rhs.data() || std::equal(lhs.begin(), lhs.end(), rhs.begin(), rhs.end()));
-}
+#if __cpp_deduction_guides >= 201606
+
+template <typename T>
+array_ref(T*, T*)
+    -> array_ref< typename array_iterator<T*>::element_type >;
+
+template <typename P>
+array_ref(array_iterator<P>, array_iterator<P>)
+    -> array_ref< typename array_iterator<P>::element_type >;
+
+template <typename T>
+array_ref(T*, typename array_iterator<T*>::difference_type)
+    -> array_ref< typename array_iterator<T*>::element_type >;
+
+template <typename T, size_t N>
+array_ref(T (&)[N])
+    -> array_ref< typename array_iterator<T*>::element_type >;
 
 template <
-    typename T,
-    typename U,
-    typename = std::enable_if_t<
-        std::is_convertible<decltype(std::declval<T>() == std::declval<U>()), bool>::value
-    >
+    typename ContainerT,
+    typename DataT = decltype(std::declval<ContainerT&>().data()),
+    typename = std::enable_if_t< std::is_pointer<DataT>::value >
 >
-constexpr bool operator!=(array_ref<T> lhs, array_ref<U> rhs) noexcept
-{
-    return !(lhs == rhs);
-}
+array_ref(ContainerT&)
+    -> array_ref< typename array_iterator<DataT>::element_type >;
 
-template <
-    typename T,
-    typename U,
-    typename = std::enable_if_t<
-        std::is_convertible<decltype(std::declval<T>() < std::declval<U>()), bool>::value
-    >
->
-constexpr bool operator<(array_ref<T> lhs, array_ref<U> rhs) noexcept
-{
-    return std::lexicographical_compare(lhs.begin(), lhs.end(), rhs.begin(), rhs.end());
-}
-
-template <
-    typename T,
-    typename U,
-    typename = std::enable_if_t<
-        std::is_convertible<decltype(std::declval<T>() < std::declval<U>()), bool>::value
-    >
->
-constexpr bool operator>(array_ref<T> lhs, array_ref<U> rhs) noexcept
-{
-    return rhs < lhs;
-}
-
-template <
-    typename T,
-    typename U,
-    typename = std::enable_if_t<
-        std::is_convertible<decltype(std::declval<T>() < std::declval<U>()), bool>::value
-    >
->
-constexpr bool operator<=(array_ref<T> lhs, array_ref<U> rhs) noexcept
-{
-    return !(rhs < lhs);
-}
-
-template <
-    typename T,
-    typename U,
-    typename = std::enable_if_t<
-        std::is_convertible<decltype(std::declval<T>() < std::declval<U>()), bool>::value
-    >
->
-constexpr bool operator>=(array_ref<T> lhs, array_ref<T> rhs) noexcept
-{
-    return !(lhs < rhs);
-}
-#endif
+#endif // __cpp_deduction_guides >= 201606
 
 } // namespace cxx
 
